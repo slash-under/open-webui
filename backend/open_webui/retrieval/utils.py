@@ -59,6 +59,13 @@ from typing import Any
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
 
+def _print_progress(current, total, prefix="", suffix="", length=50):
+    """Simple progress bar for console output"""
+    filled_length = int(length * current // total)
+    bar = "█" * filled_length + "░" * (length - filled_length)
+    percent = 100 * current / total
+    log.info(f"{prefix} |{bar}| {percent:.1f}% {suffix}")
+
 
 def is_youtube_url(url: str) -> bool:
     youtube_regex = r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$"
@@ -822,6 +829,8 @@ def get_embedding_function(
             key=key,
             user=user,
             azure_api_version=azure_api_version,
+            embedding_batch_size=embedding_batch_size,
+            enable_async=enable_async,
         )
 
         async def async_embedding_function(query, prefix=None, user=None):
@@ -881,6 +890,10 @@ async def generate_embeddings(
     key = kwargs.get("key", "")
     user = kwargs.get("user")
 
+    # Get batch size from config or use default
+    embedding_batch_size = kwargs.get("embedding_batch_size", 100)
+    enable_async = kwargs.get("enable_async", True)
+    
     if prefix is not None and RAG_EMBEDDING_PREFIX_FIELD_NAME is None:
         if isinstance(text, list):
             text = [f"{prefix}{text_element}" for text_element in text]
@@ -888,17 +901,57 @@ async def generate_embeddings(
             text = f"{prefix}{text}"
 
     if engine == "ollama":
-        embeddings = await agenerate_ollama_batch_embeddings(
-            **{
-                "model": model,
-                "texts": text if isinstance(text, list) else [text],
-                "url": url,
-                "key": key,
-                "prefix": prefix,
-                "user": user,
-            }
-        )
-        return embeddings[0] if isinstance(text, str) else embeddings
+        # Handle batching for large text lists
+        if isinstance(text, list) and len(text) > embedding_batch_size:
+            log.info(f"Breaking up {len(text)} texts into batches of {embedding_batch_size}")
+            
+            # Create batches
+            batches = [
+                text[i:i + embedding_batch_size]
+                for i in range(0, len(text), embedding_batch_size)
+            ]
+            
+            all_embeddings = []
+            total_batches = len(batches)
+            
+            # Process batches with progress tracking
+            for batch_idx, batch in enumerate(batches, 1):
+                log.info(f"Processing batch {batch_idx}/{total_batches} ({len(batch)} texts)")
+                _print_progress(batch_idx, total_batches, prefix="Embeddings", suffix=f"Batch {batch_idx}/{total_batches}")
+                
+                batch_embeddings = await agenerate_ollama_batch_embeddings(
+                    **{
+                        "model": model,
+                        "texts": batch,
+                        "url": url,
+                        "key": key,
+                        "prefix": prefix,
+                        "user": user,
+                    }
+                )
+                
+                if batch_embeddings:
+                    all_embeddings.extend(batch_embeddings)
+                else:
+                    log.error(f"Failed to generate embeddings for batch {batch_idx}")
+                    # Optionally add empty embeddings or raise error
+                    all_embeddings.extend([[] for _ in range(len(batch))])
+            
+            log.info(f"Generated {len(all_embeddings)} embeddings from {total_batches} batches")
+            return all_embeddings
+        else:
+            # Small batch, process normally
+            embeddings = await agenerate_ollama_batch_embeddings(
+                **{
+                    "model": model,
+                    "texts": text if isinstance(text, list) else [text],
+                    "url": url,
+                    "key": key,
+                    "prefix": prefix,
+                    "user": user,
+                }
+            )
+            return embeddings[0] if isinstance(text, str) else embeddings
     elif engine == "openai":
         embeddings = await agenerate_openai_batch_embeddings(
             model, text if isinstance(text, list) else [text], url, key, prefix, user
