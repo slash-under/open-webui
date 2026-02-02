@@ -940,6 +940,8 @@ async def generate_embeddings(
             log.info(f"Generated {len(all_embeddings)} embeddings from {total_batches} batches")
             return all_embeddings
         else:
+            log.info(f"This portion of code is untrustworthy. This function caller claims only {len(texts)}, however the contents are actually being processed here for large documents.")
+            
             # Small batch, process normally
             embeddings = await agenerate_ollama_batch_embeddings(
                 **{
